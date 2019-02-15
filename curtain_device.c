@@ -10,7 +10,11 @@
 #define TX_BUFFER_SIZE                      64
 #define LENGTH_CMD_CURTAIN_SET              6
 
+#if NUMBER_OF_ENDPOINTS > 1
+static BYTE g_byValue[NUMBER_OF_ENDPOINTS] = { 0 };
+#else /* NUMBER_OF_ENDPOINTS > 1 */
 static BYTE g_byValue[1] = { 0 };
+#endif /* NUMBER_OF_ENDPOINTS > 1 */
 
 static BYTE g_byTxBuffer[TX_BUFFER_SIZE] = { 0 };    
 
@@ -27,12 +31,14 @@ HandleCurtain(
 ) {
     BYTE byValue = 0;
     UNUSED(byLength);
+	
     switch (pCmd->lumi_curtain.state) {
     case STATE_RUN:
         byValue = ConvertValueMcuToZw(pCmd->lumi_curtain.level, DEVICE_CURTAIN);
-        if (pCmd->lumi_common.no == 1) { // Now only support Endpoint 0
-            g_byValue[0] = byValue;
-            HandleCurtainLevel(byValue, 0);
+
+		if (pCmd->lumi_curtain.no <= NUMBER_OF_ENDPOINTS) {
+            g_byValue[pCmd->lumi_curtain.no - 1] = byValue;
+            HandleCurtainLevel(byValue, pCmd->lumi_curtain.no);
         }
         break;
     }
@@ -49,14 +55,22 @@ SetCurtainLevel(
     BYTE byLevel,
     BYTE byEndpoint
 ) {
-    if (byEndpoint == 0) { // Now only support Endpoint 0
+    if ((byEndpoint == 0) || (byEndpoint == 1)) {
         g_byTxBuffer[0] = 1; // Device No = 1
         g_byTxBuffer[1] = DEVICE_CURTAIN;
         g_byTxBuffer[2] = STATE_RUN;
         g_byTxBuffer[3] = ConvertValueZwToMcu(byLevel, DEVICE_CURTAIN);
         SendTxData(CMD_SET_CTRL, g_byTxBuffer, LENGTH_CMD_CURTAIN_SET);
     }
+	else if (byEndpoint <= NUMBER_OF_ENDPOINTS) {
+        g_byTxBuffer[0] = byEndpoint; 
+        g_byTxBuffer[1] = DEVICE_CURTAIN;
+        g_byTxBuffer[2] = STATE_RUN;
+        g_byTxBuffer[3] = ConvertValueZwToMcu(byLevel, DEVICE_CURTAIN);
+        SendTxData(CMD_SET_CTRL, g_byTxBuffer, LENGTH_CMD_CURTAIN_SET);
+    }
 }
+
 
 /**
  * @func   GetCurtainLevel
@@ -68,9 +82,13 @@ BYTE
 GetCurtainLevel(
     BYTE byEndpoint
 ) {
-    if (byEndpoint == 0) { // Now only support Endpoint 0
-        return g_byValue[byEndpoint];
-    } else {
+    if (byEndpoint == 0) {
+        return g_byValue[0];
+    } 
+	else if (byEndpoint <= NUMBER_OF_ENDPOINTS) {
+		return g_byValue[byEndpoint - 1];
+	}
+	else {
         return 0;
     }
 }
@@ -85,8 +103,15 @@ void
 StopCurtain(
     BYTE byEndpoint
 ) {
-    if (byEndpoint == 0) { // Now only support Endpoint 0
+    if ((byEndpoint == 0) || (byEndpoint == 1)) {
         g_byTxBuffer[0] = 1;
+        g_byTxBuffer[1] = DEVICE_CURTAIN;
+        g_byTxBuffer[2] = STATE_STOP;
+        g_byTxBuffer[3] = 0; // Don't care
+        SendTxData(CMD_SET_CTRL, g_byTxBuffer, LENGTH_CMD_CURTAIN_SET);
+    }
+	else if (byEndpoint <= NUMBER_OF_ENDPOINTS) {
+	    g_byTxBuffer[0] = byEndpoint;
         g_byTxBuffer[1] = DEVICE_CURTAIN;
         g_byTxBuffer[2] = STATE_STOP;
         g_byTxBuffer[3] = 0; // Don't care

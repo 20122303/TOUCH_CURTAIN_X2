@@ -23,6 +23,7 @@
 #include <ZW_conbufio.h>
 #include "lumi_cmd.h"
 #include "serial_man.h"
+#include "setup_device.h"
 #include "report_man.h"
 #include "process_man.h"
 #include "curtain_device.h"

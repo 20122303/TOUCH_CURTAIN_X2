@@ -68,6 +68,7 @@ RELFILES:=\
  manufacturer_specific_device_id.obj\
  event_util.obj\
  serial.obj\
+ setup_device.obj\
  convert_data.obj\
  curtain_device.obj\
  serial_man.obj\

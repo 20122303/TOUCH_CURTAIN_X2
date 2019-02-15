@@ -216,8 +216,18 @@ APP_NODE_INFORMATION m_AppNIF = {
 
 const char GroupName[] = "Lifeline";
 static CMD_CLASS_GRP  agiTableLifeLine[] = { AGITABLE_LIFELINE_GROUP };
+static CMD_CLASS_GRP  agiTableLifeLineEP1_2[] = {AGITABLE_LIFELINE_GROUP_EP1_2_N};
+
+static ST_ENDPOINT_ICONS ZWavePlusEndpointIcons[] = { ENDPOINT_ICONS };
+
+static void ZCB_RootCallback(BYTE byStatus);
+static void GetListLifeLineNode(BYTE bySrcEndpoint);
+static JOB_STATUS Transmission();
 
 /*Handle only one event!*/
+static NODE_LIST g_NodeList;
+static NODE_LIST_STATUS g_NodeListStatus = NODE_LIST_STATUS_NO_MORE_NODES;
+
 static EVENT_APP eventQueue = EVENT_EMPTY;
 static BYTE g_byLastEvent = EVENT_EMPTY;
 static BYTE g_byCountCheckReset = 0;
@@ -330,16 +340,20 @@ ApplicationInitSW(void) { /* IN   Nothing */
         ZW_MEM_PUT_BYTE((WORD)&EEOFFSET_MAGIC_far, APPL_MAGIC_VALUE);
     }
 
-    /* Initialize association module */
     AssociationInit(FALSE);
 
     /* Setup AGI group lists*/
     AGI_Init();
-    AGI_LifeLineGroupSetup(
-                    agiTableLifeLine, 
-                    (sizeof(agiTableLifeLine) / sizeof(CMD_CLASS_GRP)), 
-                    GroupName EP_SUPPORT(COMMA ENDPOINT_ROOT));
-    
+    AGI_LifeLineGroupSetup(agiTableLifeLine, (sizeof(agiTableLifeLine) / sizeof(CMD_CLASS_GRP)),  GroupName EP_SUPPORT(COMMA ENDPOINT_ROOT));
+	
+	AGI_LifeLineGroupSetup(agiTableLifeLineEP1_2, (sizeof(agiTableLifeLineEP1_2) / sizeof(CMD_CLASS_GRP)),  GroupName EP_SUPPORT(COMMA ENDPOINT_1));
+	AGI_LifeLineGroupSetup(agiTableLifeLineEP1_2, (sizeof(agiTableLifeLineEP1_2) / sizeof(CMD_CLASS_GRP)),  GroupName EP_SUPPORT(COMMA ENDPOINT_2));
+
+
+	#if NUMBER_OF_ENDPOINTS > 1
+    CommandClassZWavePlusInfoInit(ZWavePlusEndpointIcons, sizeof(ZWavePlusEndpointIcons) / sizeof(ST_ENDPOINT_ICONS));
+    #endif /* NUMBER_OF_ENDPOINTS > 1 */    
+	
     /* Get this sensors identification on the network */
     MemoryGetID(NULL, &myNodeID);
 
@@ -347,6 +361,11 @@ ApplicationInitSW(void) { /* IN   Nothing */
     ManufacturerSpecificDeviceIDInit();
 
     InitProcessManager(AppStateManager, NULL);
+
+	#if NUMBER_OF_ENDPOINTS > 1
+    SetAllEnpointsNIF();
+    Transport_AddEndpointSupport(&g_EndPointFunctionality, g_EndpointNIF, NUMBER_OF_ENDPOINTS);
+	#endif /* NUMBER_OF_ENDPOINTS > 1 */
 
     #ifdef BOOTLOADER_ENABLED
     /* Initialize OTA module */
@@ -710,6 +729,16 @@ AppStateManager(
         } else if (EVENT_BUTTON_REPORT_TOUCH_HOLD == ev) {
             //SerialReport(EVENT_BUTTON_REPORT_TOUCH_HOLD);
         } 
+
+        if (EVENT_REPORT_LIFELINE == ev) {
+            if (g_NodeListStatus == NODE_LIST_STATUS_SUCCESS) {
+                if (JOB_STATUS_SUCCESS != Transmission()) {
+                    Report_StateCompleted(JOB_STATUS_BUSY);
+                }
+            } else {
+                Report_StateCompleted(JOB_STATUS_BUSY);
+            }
+        }
 
         if (EVENT_REPORT_STATE_ENDPOINT == ev) {
             AddEvent(EVENT_REPORT_ENDPOINT);
@@ -1191,6 +1220,7 @@ HandleWindowCoveringStartLevelChange(
     EP_SUPPORT(COMMA BYTE endpoint)
 ) {
     NO_EP_SUPPORT(BYTE endpoint = 0;)
+	EP_SUPPORT(UNUSED(endpoint);)
     UNUSED(boDimUp);
     UNUSED(paramId);
     UNUSED(byDuration);
@@ -1208,6 +1238,7 @@ HandleWindowCoveringStopLevelChange(
     EP_SUPPORT(COMMA BYTE endpoint)
 ) {
     NO_EP_SUPPORT(BYTE endpoint = 0;)
+	EP_SUPPORT(UNUSED(endpoint);)
     UNUSED(paramId);
 }
 
@@ -1227,17 +1258,26 @@ HandleCurtainLevel(
     BYTE byEndpoint
 ) {
     BYTE byDestNode = AssociationGetLifeLineNodeID();
+    JOB_STATUS jobStatus = JOB_STATUS_BUSY;
+	
     UNUSED(byEndpoint);
+	GetListLifeLineNode(byEndpoint); 
 
     if ((byDestNode == 0xFF) || (GetMyNodeID() == 0)) { return; }
 
     if (!g_boGetFirstTime) {
         #if   MULTILEVEL_SWITCH_VERSION == 1
-        CmdClassMultiLevelSwitchV1ReportSendUnsolicited(
-                                ZWAVE_PLUS_TX_OPTIONS,
-                                byDestNode,
-                                byLevel, 
-                                Report_StateCompleted);
+		if (byEndpoint == 1) {
+	        jobStatus = CmdClassMultiLevelSwitchV1ReportSendUnsolicited(
+                                ReqTxOptions(&g_NodeList.pNodeList[0], 0),
+                                byLevel,
+                                ZCB_RootCallback);
+		}
+
+		if (JOB_STATUS_SUCCESS != jobStatus) {
+            ZCB_RootCallback(jobStatus);
+        }
+								
         #endif /* MULTILEVEL_SWITCH_VERSION == 1 */ 
         
         #if MULTILEVEL_SWITCH_VERSION == 2
@@ -1259,6 +1299,45 @@ HandleCurtainLevel(
     g_boGetFirstTime = FALSE;
 }
 
+
+void
+GetListLifeLineNode(
+    BYTE bySrcEndpoint
+) {
+    BYTE byListSize = 0;
+
+    g_NodeList.sourceEndpoint = bySrcEndpoint;
+    g_NodeListStatus = AGI_LifeLineNodeIdListLookup(
+                                    &(g_NodeList.pCurrentCmdGrp),
+                                    &byListSize,
+                                    &(g_NodeList.pNodeList),
+                                    &(g_NodeList.len),
+                                    g_NodeList.sourceEndpoint);
+
+    g_NodeList.pCurrentNode = g_NodeList.pNodeList;
+}
+
+
+JOB_STATUS
+Transmission(
+) {
+    if ((COMMAND_CLASS_SWITCH_MULTILEVEL == g_NodeList.pCurrentCmdGrp->cmdClass) &&
+               (SWITCH_MULTILEVEL_REPORT == g_NodeList.pCurrentCmdGrp->cmd)) {
+        TRANSMIT_OPTIONS_TYPE_EX pTxOptionsEx;
+        pTxOptionsEx.sourceEndpoint = g_NodeList.sourceEndpoint;
+        pTxOptionsEx.txOptions = ZWAVE_PLUS_TX_OPTIONS;
+        pTxOptionsEx.securityScheme = SEC_SCHEME_AUTO;
+        memcpy((BYTE*)&pTxOptionsEx.destNode, (BYTE*)&g_NodeList.pCurrentNode->node, sizeof(MULTICHAN_DEST_NODE_ID));
+
+        return CmdClassMultiLevelSwitchV1ReportSendUnsolicited(
+                &pTxOptionsEx,
+                GetCurtainLevel(g_NodeList.sourceEndpoint),
+                Report_StateCompleted);
+    }
+    return JOB_STATUS_BUSY;
+}
+
+
 /**
  * @func   KeyStatus
  * @brief  None
@@ -1275,6 +1354,15 @@ PCB(KeyStatus) (
         break;
     }
 }
+
+
+PCB(ZCB_RootCallback) (
+    BYTE byTxStatus
+) {
+    UNUSED(byTxStatus);
+    AddEvent(EVENT_REPORT_LIFELINE);
+}
+
 
 /**
  * @func   Report_StateCompleted
